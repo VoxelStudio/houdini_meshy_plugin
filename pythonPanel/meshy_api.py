@@ -7,6 +7,7 @@ import json
 import time
 import requests
 from typing import Dict, Any, Optional
+import re
 
 class MeshyAPI:
     """Classe principale pour interagir avec l'API Meshy"""
@@ -358,10 +359,33 @@ class MeshyAPI:
         refine_response.raise_for_status()
         return refine_response.json()
         
+    def clean_node_name(self, name: str) -> str:
+        """Nettoie un nom pour le rendre compatible avec Houdini
+        
+        Args:
+            name: Nom à nettoyer
+            
+        Returns:
+            str: Nom nettoyé et compatible avec Houdini
+        """
+        # Remplacer les caractères spéciaux par des underscores
+        cleaned = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        # Supprimer les underscores multiples
+        cleaned = re.sub(r'_+', '_', cleaned)
+        # Supprimer les underscores au début et à la fin
+        cleaned = cleaned.strip('_')
+        # Limiter la longueur à 30 caractères
+        cleaned = cleaned[:30]
+        # S'assurer que le nom commence par une lettre
+        if not cleaned[0].isalpha():
+            cleaned = 'n_' + cleaned
+        return cleaned.lower()
+
     def import_model_to_houdini(self, result: Dict[str, Any], node_context, save_path: str = None) -> None:
         """Importe le modèle généré dans Houdini"""
         import hou
         import sys
+        import re
         
         def log(msg):
             print(msg, file=sys.stderr)
@@ -382,8 +406,9 @@ class MeshyAPI:
         os.makedirs(output_dir, exist_ok=True)
         log(f"📁 Dossier de sauvegarde : {output_dir}")
         
-        # Télécharger le modèle
-        safe_name = result.get("prompt", "model")[:30].lower().replace(" ", "_")
+        # Nettoyer le nom du prompt pour le fichier et le nœud
+        prompt = result.get("prompt", "model")
+        safe_name = self.clean_node_name(prompt)
         output_path = os.path.join(output_dir, f"{safe_name}.fbx")
         log(f"💾 Sauvegarde du modèle vers : {output_path}")
         
@@ -398,7 +423,7 @@ class MeshyAPI:
         if not os.path.exists(output_path):
             raise ValueError(f"Le fichier n'existe pas après téléchargement : {output_path}")
         
-        # Créer un nœud Geometry
+        # Créer un nœud Geometry avec un nom nettoyé
         geo_node = node_context.createNode("geo", f"meshy_{safe_name}")
         
         # Créer un nœud FBX pour importer le modèle (utiliser fbxcharacterimport)
