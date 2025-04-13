@@ -1,0 +1,17 @@
+include LICENSE
+include README.md
+include requirements.txt
+include requirements-dev.txt
+include .env.example
+
+recursive-include src/houdini_meshy_plugin/ui/resources *
+recursive-include src/houdini_meshy_plugin/config *.json
+recursive-include docs *.md *.rst
+recursive-include examples *.py
+
+recursive-exclude * __pycache__
+recursive-exclude * *.py[cod]
+recursive-exclude * *.so
+recursive-exclude tests *
+recursive-exclude .* *
+recursive-exclude scripts * 

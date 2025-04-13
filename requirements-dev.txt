@@ -1,0 +1,37 @@
+# Inclure les dépendances de base
+-r requirements.txt
+
+# Tests
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.1
+pytest-asyncio>=0.21.1
+tox>=4.6.4
+
+# Linting et Formatage
+black>=23.7.0
+isort>=5.12.0
+flake8>=6.1.0
+mypy>=1.5.1
+pylint>=2.17.5
+
+# Documentation
+mkdocs>=1.5.2
+mkdocs-material>=9.2.0
+mkdocstrings>=0.22.0
+mkdocs-autodoc>=0.8.0
+
+# Sécurité
+bandit>=1.7.5
+safety>=2.3.5
+
+# Développement
+pre-commit>=3.3.3
+ipython>=8.14.0
+ipdb>=0.13.13
+watchdog>=3.0.0
+
+# Build
+build>=0.10.0
+twine>=4.0.2
+wheel>=0.41.0 
