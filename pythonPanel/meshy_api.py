@@ -321,3 +321,98 @@ class MeshyAPI:
             log(f"❌ Erreur: {str(e)}")
             log(f"📋 Type d'erreur: {type(e)}")
             raise 
+
+    def text_to_3d_preview(self, prompt: str) -> Dict[str, Any]:
+        """Lance la première étape (preview) de la génération"""
+        if not self.api_key:
+            raise ValueError("Clé API non configurée")
+            
+        preview_endpoint = "https://api.meshy.ai/openapi/v2/text-to-3d"
+        preview_data = {
+            "mode": "preview",
+            "prompt": prompt,
+            "art_style": "realistic",
+            "topology": "quad",
+            "target_polycount": 30000,
+            "should_remesh": True,
+            "symmetry_mode": "auto"
+        }
+        
+        preview_response = self.session.post(preview_endpoint, json=preview_data)
+        preview_response.raise_for_status()
+        return preview_response.json()
+        
+    def text_to_3d_refine(self, preview_task_id: str) -> Dict[str, Any]:
+        """Lance la deuxième étape (refine) de la génération"""
+        if not self.api_key:
+            raise ValueError("Clé API non configurée")
+            
+        refine_endpoint = "https://api.meshy.ai/openapi/v2/text-to-3d"
+        refine_data = {
+            "mode": "refine",
+            "preview_task_id": preview_task_id,
+            "enable_pbr": True
+        }
+        
+        refine_response = self.session.post(refine_endpoint, json=refine_data)
+        refine_response.raise_for_status()
+        return refine_response.json()
+        
+    def import_model_to_houdini(self, result: Dict[str, Any], node_context, save_path: str = None) -> None:
+        """Importe le modèle généré dans Houdini"""
+        import hou
+        import sys
+        
+        def log(msg):
+            print(msg, file=sys.stderr)
+            sys.stderr.flush()
+        
+        # Récupérer l'URL du modèle FBX
+        model_url = result.get("model_urls", {}).get("fbx")
+        if not model_url:
+            raise ValueError("URL du modèle FBX non trouvée dans la réponse")
+            
+        # Utiliser le chemin fourni ou le chemin par défaut
+        if save_path:
+            # Développer les variables d'environnement Houdini
+            output_dir = hou.expandString(save_path)
+        else:
+            output_dir = os.path.expanduser("~/houdini20.5/meshy_plugin/models")
+            
+        os.makedirs(output_dir, exist_ok=True)
+        log(f"📁 Dossier de sauvegarde : {output_dir}")
+        
+        # Télécharger le modèle
+        safe_name = result.get("prompt", "model")[:30].lower().replace(" ", "_")
+        output_path = os.path.join(output_dir, f"{safe_name}.fbx")
+        log(f"💾 Sauvegarde du modèle vers : {output_path}")
+        
+        try:
+            self.download_model(model_url, output_path)
+            log(f"📦 Taille du fichier : {os.path.getsize(output_path)} bytes")
+        except Exception as e:
+            log(f"❌ Erreur lors du téléchargement : {str(e)}")
+            raise
+        
+        # Vérifier que le fichier existe
+        if not os.path.exists(output_path):
+            raise ValueError(f"Le fichier n'existe pas après téléchargement : {output_path}")
+        
+        # Créer un nœud Geometry
+        geo_node = node_context.createNode("geo", f"meshy_{safe_name}")
+        
+        # Créer un nœud FBX pour importer le modèle (utiliser fbxcharacterimport)
+        fbx_node = geo_node.createNode("fbxcharacterimport")
+        fbx_node.parm("fbxfile").set(output_path)  # Le paramètre est 'fbxfile' pour fbxcharacterimport
+        
+        # Mettre à jour le nœud
+        log("🔄 Import du modèle dans Houdini...")
+        fbx_node.cook(force=True)
+        
+        # Layout du réseau
+        geo_node.layoutChildren()
+        
+        # Sélectionner le nouveau nœud
+        geo_node.setSelected(True)
+        
+        log("✅ Import terminé avec succès!") 

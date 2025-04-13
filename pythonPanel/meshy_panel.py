@@ -9,12 +9,82 @@ from typing import Optional
 
 from .meshy_api import MeshyAPI
 
+class MeshyWorker(QtCore.QThread):
+    """Worker thread pour la génération de modèles"""
+    progress = QtCore.Signal(int, str)  # (pourcentage, message)
+    finished = QtCore.Signal(dict)  # résultat final
+    error = QtCore.Signal(str)  # message d'erreur
+    
+    def __init__(self, api, prompt, node_context, save_path=None):
+        super().__init__()
+        self.api = api
+        self.prompt = prompt
+        self.node_context = node_context
+        self.save_path = save_path
+        self._is_cancelled = False
+        
+    def run(self):
+        try:
+            # Étape 1: Preview
+            self.progress.emit(0, "Démarrage de la génération...")
+            preview_result = self.api.text_to_3d_preview(self.prompt)
+            preview_task_id = preview_result["result"]
+            
+            # Suivi du preview
+            attempts = 0
+            max_attempts = 150
+            while attempts < max_attempts and not self._is_cancelled:
+                status = self.api.get_job_status(preview_task_id)
+                if status["status"] == "SUCCEEDED":
+                    self.progress.emit(50, "Preview terminé, démarrage du raffinement...")
+                    break
+                elif status["status"] == "FAILED":
+                    self.error.emit(f"Erreur lors du preview: {status.get('error', 'Erreur inconnue')}")
+                    return
+                    
+                progress = (attempts / max_attempts) * 50  # 0-50% pour le preview
+                self.progress.emit(int(progress), f"Génération du preview... {int(progress)}%")
+                self.msleep(2000)  # Pause de 2 secondes
+                attempts += 1
+                
+            if self._is_cancelled:
+                return
+                
+            # Étape 2: Refine
+            refine_result = self.api.text_to_3d_refine(preview_task_id)
+            refine_task_id = refine_result["result"]
+            
+            # Suivi du refine
+            attempts = 0
+            while attempts < max_attempts and not self._is_cancelled:
+                status = self.api.get_job_status(refine_task_id)
+                if status["status"] == "SUCCEEDED":
+                    self.progress.emit(100, "Raffinement terminé!")
+                    status["prompt"] = self.prompt  # Ajouter le prompt pour le nom du fichier
+                    self.finished.emit(status)
+                    break
+                elif status["status"] == "FAILED":
+                    self.error.emit(f"Erreur lors du raffinement: {status.get('error', 'Erreur inconnue')}")
+                    return
+                    
+                progress = 50 + (attempts / max_attempts) * 50  # 50-100% pour le refine
+                self.progress.emit(int(progress), f"Raffinement en cours... {int(progress)}%")
+                self.msleep(2000)
+                attempts += 1
+                
+        except Exception as e:
+            self.error.emit(f"Erreur: {str(e)}\n{traceback.format_exc()}")
+            
+    def cancel(self):
+        self._is_cancelled = True
+
 class MeshyPanel(QtWidgets.QWidget):
     """Panel principal pour l'interface Meshy"""
     
     def __init__(self):
         super().__init__()
         self.api = MeshyAPI()
+        self.worker = None
         # Charger la configuration existante
         self.api.load_config()
         self.setup_ui()
@@ -40,9 +110,9 @@ class MeshyPanel(QtWidgets.QWidget):
         api_key_layout.addWidget(self.api_key_input)
         
         # Bouton pour sauvegarder/vérifier la clé API
-        save_api_btn = QtWidgets.QPushButton("Sauvegarder")
-        save_api_btn.clicked.connect(self.save_api_key)
-        api_key_layout.addWidget(save_api_btn)
+        self.save_api_button = QtWidgets.QPushButton("Sauvegarder")
+        self.save_api_button.clicked.connect(self.save_api_key)
+        api_key_layout.addWidget(self.save_api_button)
         
         api_layout.addLayout(api_key_layout)
         
@@ -68,11 +138,31 @@ class MeshyPanel(QtWidgets.QWidget):
         api_group.setLayout(api_layout)
         layout.addWidget(api_group)
         
-        # Ajouter une ligne de séparation
-        line = QtWidgets.QFrame()
-        line.setFrameShape(QtWidgets.QFrame.HLine)
-        line.setFrameShadow(QtWidgets.QFrame.Sunken)
-        layout.addWidget(line)
+        # Groupe Configuration Sauvegarde
+        save_group = QtWidgets.QGroupBox("Configuration Sauvegarde")
+        save_layout = QtWidgets.QVBoxLayout()
+        
+        # Checkbox pour utiliser $HIP
+        self.use_hip_checkbox = QtWidgets.QCheckBox("Utiliser $HIP (dossier du projet Houdini)")
+        self.use_hip_checkbox.setChecked(True)
+        self.use_hip_checkbox.stateChanged.connect(self.toggle_save_path)
+        save_layout.addWidget(self.use_hip_checkbox)
+        
+        # Layout pour le chemin de sauvegarde
+        save_path_layout = QtWidgets.QHBoxLayout()
+        self.save_path_input = QtWidgets.QLineEdit()
+        self.save_path_input.setPlaceholderText("Chemin de sauvegarde des modèles...")
+        self.save_path_input.setEnabled(False)  # Désactivé par défaut car $HIP est coché
+        save_path_layout.addWidget(self.save_path_input)
+        
+        # Bouton parcourir
+        browse_save_btn = QtWidgets.QPushButton("Parcourir")
+        browse_save_btn.clicked.connect(self.browse_save_path)
+        save_path_layout.addWidget(browse_save_btn)
+        
+        save_layout.addLayout(save_path_layout)
+        save_group.setLayout(save_layout)
+        layout.addWidget(save_group)
         
         # Groupe Text-to-3D
         text_group = QtWidgets.QGroupBox("Text to 3D")
@@ -85,9 +175,9 @@ class MeshyPanel(QtWidgets.QWidget):
         text_layout.addWidget(self.prompt_input)
         
         # Bouton de génération
-        generate_text_btn = QtWidgets.QPushButton("Générer depuis le texte")
-        generate_text_btn.clicked.connect(self.text_to_3d_clicked)
-        text_layout.addWidget(generate_text_btn)
+        self.generate_button = QtWidgets.QPushButton("Générer depuis le texte")
+        self.generate_button.clicked.connect(self.text_to_3d_clicked)
+        text_layout.addWidget(self.generate_button)
         
         text_group.setLayout(text_layout)
         layout.addWidget(text_group)
@@ -103,16 +193,16 @@ class MeshyPanel(QtWidgets.QWidget):
         image_path_layout.addWidget(self.image_path_input)
         
         # Bouton de sélection de fichier
-        browse_btn = QtWidgets.QPushButton("Parcourir")
-        browse_btn.clicked.connect(self.browse_image)
-        image_path_layout.addWidget(browse_btn)
+        self.browse_image_button = QtWidgets.QPushButton("Parcourir")
+        self.browse_image_button.clicked.connect(self.browse_image)
+        image_path_layout.addWidget(self.browse_image_button)
         
         image_layout.addLayout(image_path_layout)
         
         # Bouton de génération depuis l'image
-        generate_image_btn = QtWidgets.QPushButton("Générer depuis l'image")
-        generate_image_btn.clicked.connect(self.generate_from_image)
-        image_layout.addWidget(generate_image_btn)
+        self.generate_image_button = QtWidgets.QPushButton("Générer depuis l'image")
+        self.generate_image_button.clicked.connect(self.generate_from_image)
+        image_layout.addWidget(self.generate_image_button)
         
         image_group.setLayout(image_layout)
         layout.addWidget(image_group)
@@ -136,9 +226,9 @@ class MeshyPanel(QtWidgets.QWidget):
         texture_layout.addLayout(style_layout)
 
         # Bouton pour texturer
-        texture_btn = QtWidgets.QPushButton("Texturer la géométrie")
-        texture_btn.clicked.connect(self.texture_selected_geometry)
-        texture_layout.addWidget(texture_btn)
+        self.texture_button = QtWidgets.QPushButton("Texturer la géométrie")
+        self.texture_button.clicked.connect(self.texture_selected_geometry)
+        texture_layout.addWidget(self.texture_button)
 
         texture_group.setLayout(texture_layout)
         layout.addWidget(texture_group)
@@ -149,8 +239,15 @@ class MeshyPanel(QtWidgets.QWidget):
         
         # Barre de progression
         self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.hide()
         layout.addWidget(self.progress_bar)
+        
+        # Bouton d'annulation
+        self.cancel_button = QtWidgets.QPushButton("Annuler")
+        self.cancel_button.hide()
+        self.cancel_button.clicked.connect(self.cancel_generation)
+        layout.addWidget(self.cancel_button)
         
         # Ajouter un espace extensible à la fin
         layout.addStretch()
@@ -220,14 +317,29 @@ class MeshyPanel(QtWidgets.QWidget):
             return
             
         try:
+            # Désactiver l'interface pendant le traitement
+            self.disable_ui_controls()
+            self.progress_bar.setValue(0)
+            self.progress_bar.show()
+            self.cancel_button.show()
+            self.status_label.setText("Démarrage de la génération...")
+            
             # Récupérer le contexte du nœud actuel
             node_context = hou.node("/obj")
             
-            # Lancer la génération et l'import
-            self.api.text_to_3d_houdini(prompt, node_context)
+            # Obtenir le chemin de sauvegarde
+            save_path = self.get_save_path()
+            
+            # Création et démarrage du worker
+            self.worker = MeshyWorker(self.api, prompt, node_context, save_path)
+            self.worker.progress.connect(self.on_progress)
+            self.worker.error.connect(self.on_error)
+            self.worker.finished.connect(self.on_finished)
+            self.worker.start()
             
         except Exception as e:
             self.show_error(f"Erreur lors de la génération : {str(e)}")
+            self.reset_ui_state()
             
     def show_error(self, message):
         """Affiche une boîte de dialogue d'erreur"""
@@ -258,21 +370,20 @@ class MeshyPanel(QtWidgets.QWidget):
         
         try:
             self.status_label.setText("Génération en cours...")
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)  # Mode indéterminé
+            self.progress_bar.show()
+            self.cancel_button.show()
             
-            # Appel à l'API
-            response = self.api.image_to_3d(image_path)
-            
-            # TODO: Gérer la réponse et l'importation
-            # Cette partie sera développée plus tard
-            
-            self.status_label.setText("Génération réussie!")
-            self.progress_bar.setVisible(False)
+            # Création et démarrage du worker
+            self.worker = MeshyWorker(self.api, "", hou.node("/obj"), self.get_save_path())
+            self.worker.progress.connect(self.on_progress)
+            self.worker.error.connect(self.on_error)
+            self.worker.finished.connect(self.on_finished)
+            self.worker.start()
             
         except Exception as e:
             self.status_label.setText(f"Erreur: {str(e)}")
-            self.progress_bar.setVisible(False)
+            self.progress_bar.hide()
+            self.cancel_button.hide()
             QtWidgets.QMessageBox.critical(
                 self,
                 "Erreur",
@@ -317,30 +428,121 @@ class MeshyPanel(QtWidgets.QWidget):
             style = self.style_combo.currentText().lower()
             
             self.status_label.setText("Texturation en cours...")
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)
+            self.progress_bar.show()
+            self.cancel_button.show()
             
-            # Envoyer à Meshy
-            response = self.api.texture_geometry(
-                temp_file,
-                prompt=prompt if prompt else None,
-                style=style
-            )
-            
-            # TODO: Gérer la réponse et appliquer les textures
-            # Cette partie sera développée plus tard
-            
-            self.status_label.setText("Texturation réussie!")
-            self.progress_bar.setVisible(False)
+            # Création et démarrage du worker
+            self.worker = MeshyWorker(self.api, prompt, node, self.get_save_path())
+            self.worker.progress.connect(self.on_progress)
+            self.worker.error.connect(self.on_error)
+            self.worker.finished.connect(self.on_finished)
+            self.worker.start()
             
         except Exception as e:
             self.status_label.setText(f"Erreur: {str(e)}")
-            self.progress_bar.setVisible(False)
+            self.progress_bar.hide()
+            self.cancel_button.hide()
             QtWidgets.QMessageBox.critical(
                 self,
                 "Erreur",
                 f"Une erreur est survenue: {str(e)}"
             )
+
+    def on_progress(self, value, message):
+        """Mise à jour de la progression"""
+        self.progress_bar.setValue(value)
+        self.progress_bar.setFormat(f"{message}")
+        self.status_label.setText(message)
+        
+    def on_error(self, message):
+        """Gestion des erreurs"""
+        self.progress_bar.hide()
+        self.cancel_button.hide()
+        self.status_label.setText(f"Erreur: {message}")
+        self.reset_ui_state()
+        self.show_error(message)
+        
+    def on_finished(self, result):
+        """Gestion de la fin de la génération"""
+        try:
+            # Import du modèle dans Houdini avec le chemin personnalisé
+            self.api.import_model_to_houdini(result, hou.node("/obj"), self.get_save_path())
+            self.progress_bar.hide()
+            self.cancel_button.hide()
+            self.status_label.setText("Modèle généré et importé avec succès!")
+            self.reset_ui_state()
+        except Exception as e:
+            self.on_error(str(e))
+        
+    def cancel_generation(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait()
+            self.progress_bar.hide()
+            self.cancel_button.hide()
+            self.status_label.setText("Génération annulée")
+            
+    def closeEvent(self, event):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait()
+        super().closeEvent(event)
+
+    def toggle_save_path(self, state):
+        """Active/désactive le champ de chemin de sauvegarde selon l'état de la checkbox"""
+        self.save_path_input.setEnabled(not state)
+        if state:
+            # Si $HIP est activé, on met à jour le chemin affiché
+            hip = hou.expandString("$HIP")
+            self.save_path_input.setPlaceholderText(f"$HIP ({hip})")
+        else:
+            self.save_path_input.setPlaceholderText("Chemin de sauvegarde des modèles...")
+            
+    def browse_save_path(self):
+        """Ouvre un dialogue pour sélectionner le dossier de sauvegarde"""
+        if self.use_hip_checkbox.isChecked():
+            return
+            
+        folder_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Sélectionner le dossier de sauvegarde",
+            self.save_path_input.text() or hou.expandString("$HOME")
+        )
+        if folder_path:
+            self.save_path_input.setText(folder_path)
+            
+    def get_save_path(self) -> str:
+        """Retourne le chemin de sauvegarde actuel"""
+        if self.use_hip_checkbox.isChecked():
+            base_path = hou.expandString("$HIP")
+        else:
+            base_path = self.save_path_input.text().strip() or hou.expandString("$HOME")
+        
+        # Ajouter le sous-dossier meshy_models
+        return os.path.join(base_path, "meshy_models")
+
+    def reset_ui_state(self):
+        """Réinitialise l'état de l'interface"""
+        # Réactiver tous les contrôles
+        self.prompt_input.setEnabled(True)
+        self.generate_button.setEnabled(True)
+        self.generate_image_button.setEnabled(True)
+        self.texture_button.setEnabled(True)
+        self.browse_image_button.setEnabled(True)
+        self.save_api_button.setEnabled(True)
+        
+        # Cacher les éléments de progression
+        self.progress_bar.hide()
+        self.cancel_button.hide()
+        
+    def disable_ui_controls(self):
+        """Désactive les contrôles pendant le traitement"""
+        self.prompt_input.setEnabled(False)
+        self.generate_button.setEnabled(False)
+        self.generate_image_button.setEnabled(False)
+        self.texture_button.setEnabled(False)
+        self.browse_image_button.setEnabled(False)
+        self.save_api_button.setEnabled(False)
 
 def createInterface():
     """Fonction requise par Houdini pour créer le panel"""
